@@ -1,7 +1,7 @@
-import React, {useMemo,useState,useEffect} from "react";
+import React, {useMemo,useState,useEffect,useRef} from "react";
 import {initializeApp} from "firebase/app";
-import {getAuth,signInAnonymously} from "firebase/auth";
-import {getFirestore,doc,onSnapshot,setDoc} from "firebase/firestore";
+import {getAuth, signInAnonymously, sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink, createUserWithEmailAndPassword, signInWithEmailAndPassword, GoogleAuthProvider, signInWithRedirect, getRedirectResult, sendPasswordResetEmail, onAuthStateChanged, signOut} from "firebase/auth";
+import {getFirestore,doc,onSnapshot,setDoc, arrayUnion, arrayRemove, collection, getDocs, query, where, getDoc, deleteDoc, addDoc, serverTimestamp} from "firebase/firestore";
 
 // ===== utils (compact)
 const mf=new Intl.NumberFormat("ro-RO",{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -21,9 +21,71 @@ const curr=["EUR","RON","MDL"] as const; const src=["Valentin","Adrea","Studio",
 const LS="buget-mobile-state-v3"; const load=()=>{try{return JSON.parse(localStorage.getItem(LS)||"null")}catch{return null}}; const save=(s:any)=>localStorage.setItem(LS,JSON.stringify(s));
 
 // ===== cloud (Firestore anon)
-const CLOUD_DEF:any={enabled:false,budgetId:"",cfg:""}; let _app:any=null,_db:any=null,_auth:any=null,_pull=false;
+// Default Firebase web config (from user) — used when no manual config is provided in Settings.
+const DEFAULT_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDwk-ycTfv1LbsN7KtuI_OWbm4-0RoTmX0",
+  authDomain: "bugetjukov.firebaseapp.com",
+  projectId: "bugetjukov",
+  storageBucket: "bugetjukov.firebasestorage.app",
+  messagingSenderId: "1079891521113",
+  appId: "1:1079891521113:web:83ffdc9b9604c97f788b48",
+  measurementId: "G-RT2SL8B96C"
+};
+
+const CLOUD_DEF:any={enabled:true,budgetId:"bugetjukov",cfg:JSON.stringify(DEFAULT_FIREBASE_CONFIG)}; let _app:any=null,_db:any=null,_auth:any=null,_pull=false;
 const validFbConfig=(cfg:any)=>!!(cfg&&cfg.apiKey&&cfg.projectId&&cfg.appId);
-const fbInit=(cfgStr:string)=>{try{const cfg=JSON.parse(cfgStr||"{}"); if(!validFbConfig(cfg)) return false; if(!_app){_app=initializeApp(cfg); _auth=getAuth(_app); signInAnonymously(_auth).catch(()=>{}); _db=getFirestore(_app);} return true;}catch{return false}};
+
+// Try to parse a Firebase config provided as JSON or as the standard JS snippet.
+function parseFirebaseConfig(raw:string){
+  if(!raw || typeof raw !== 'string') return null;
+  const s = raw.trim();
+  // Quick try JSON.parse
+  try{ return JSON.parse(s); }catch(e){}
+
+  // Try to extract the first object literal {...} by scanning braces to handle nested braces reliably
+  const firstBrace = s.indexOf('{');
+  if(firstBrace === -1) return null;
+  let depth = 0; let end = -1;
+  for(let i=firstBrace;i<s.length;i++){
+    const ch = s[i];
+    if(ch === '{') depth++; else if(ch === '}'){ depth--; if(depth===0){ end = i; break; }}
+  }
+  if(end===-1) return null;
+  const objStr = s.slice(firstBrace, end+1);
+
+  // Try JSON.parse on cleaned string
+  try{ return JSON.parse(objStr); }catch(e){}
+
+  // As a last resort, try to evaluate the object literal (runs in client runtime). Wrap in parentheses.
+  try{
+    // eslint-disable-next-line no-new-func
+    const fn = new Function('return (' + objStr + ')');
+    const obj = fn();
+    return obj && typeof obj === 'object' ? obj : null;
+  }catch(e){
+    console.error('parseFirebaseConfig failed', e);
+    return null;
+  }
+}
+
+/**
+ * Initialize Firebase app and services. Accepts raw JSON/string/object or will fallback to DEFAULT_FIREBASE_CONFIG.
+ */
+const fbInit=(cfgStrOrObj:any, allowAnon=true)=>{
+  try{
+    let parsed:any = null;
+    // If nothing provided, use the embedded default config
+    if(!cfgStrOrObj){ parsed = DEFAULT_FIREBASE_CONFIG; }
+    else if(typeof cfgStrOrObj === 'string'){
+      parsed = parseFirebaseConfig(cfgStrOrObj) || DEFAULT_FIREBASE_CONFIG;
+    }else if(typeof cfgStrOrObj === 'object'){
+      parsed = cfgStrOrObj;
+    }
+    if(!parsed || !validFbConfig(parsed)) return false;
+    if(!_app){ _app = initializeApp(parsed); _auth = getAuth(_app); _db = getFirestore(_app); if(allowAnon){ signInAnonymously(_auth).catch(()=>{}); } }
+    return true;
+  }catch(err){ console.error('fbInit error', err); return false; }
+};
 const ref=(id:string)=>_db?doc(_db,"budgets",id):null;
 
 // ===== types/helpers
@@ -43,7 +105,22 @@ const Opt=({list}:{list:any[]})=>(<>{list.map(x=>(<option key={String(x)}>{Strin
 const Section=({title,children}:{title:string;children:React.ReactNode})=> (<div className="mt-4 bg-white rounded-2xl shadow p-4"><div className="text-lg font-semibold mb-3">{title}</div>{children}</div>);
 const KPI=React.memo(({label,value}:{label:string;value:string})=> (<div className="flex flex-col p-3 rounded-xl bg-slate-50"><div className="text-xs text-slate-500">{label}</div><div className="text-2xl font-bold">{value}</div></div>));
 const Tabs=({value,onChange,tabs}:{value:string;onChange:(v:string)=>void;tabs:{value:string;label:string}[]})=> (<div className="sticky top-0 z-10 bg-white/90 backdrop-blur border-b"><div className="flex overflow-x-auto no-scrollbar">{tabs.map(t=> (<button key={t.value} onClick={()=>onChange(t.value)} className={`px-4 py-3 text-sm whitespace-nowrap border-b-2 ${value===t.value?"border-slate-900 font-semibold":"border-transparent text-slate-500"}`}>{t.label}</button>))}</div></div>);
-const Table=React.memo(function({head,rows,renderRow,emptyText="Nimic de afișat",compact=false}:{head:string[];rows:any[];renderRow:(r:any,i:number)=>React.ReactNode;emptyText?:string;compact?:boolean}){return(<div className={compact?"overflow-x-hidden":"overflow-x-auto -mx-4 sm:mx-0 touch-pan-x"}><table className={compact?"w-full table-fixed text-sm":"min-w-[1000px] text-sm"}><thead><tr>{head.map(h=>(<th key={h} className="text-left px-4 py-2 bg-slate-50 whitespace-nowrap">{h}</th>))}</tr></thead><tbody>{rows.length===0?(<tr><td colSpan={head.length} className="px-4 py-6 text-slate-500">{emptyText}</td></tr>):(rows.map((r,i)=>(<tr key={i} className="border-t odd:bg-slate-50/40">{renderRow(r,i)}</tr>)))}</tbody></table></div>) });
+function useIsMobile(){const [isM,setM]=useState(()=>typeof window!=='undefined' && window.matchMedia? window.matchMedia('(max-width:640px)').matches:false); useEffect(()=>{if(typeof window==='undefined'||!window.matchMedia) return; const mq=window.matchMedia('(max-width:640px)'); const h=(e:any)=>setM(e.matches); mq.addEventListener?.('change',h); mq.addListener?.(h); return()=>{ mq.removeEventListener?.('change',h); mq.removeListener?.(h); }; },[]); return isM; }
+
+const Table=React.memo(function({head,rows,renderRow,emptyText="Nimic de afișat",compact=false}:{head:string[];rows:any[];renderRow:(r:any,i:number)=>React.ReactNode;emptyText?:string;compact?:boolean}){
+  const isMobile=useIsMobile();
+  if(rows.length===0) return (<div className="px-4 py-6 text-slate-500">{emptyText}</div>);
+  if(isMobile){
+    return (<div className="card-list">
+      {rows.map((r,i)=>(<div key={r.id||i} className="card-row">{/** renderRow produces td elements; we need a compact mobile rendering */}
+        {/** For mobile, render a reduced summary: call renderRow into a wrapper and try to extract textContent fallback */}
+        <div className="row-field"><div style={{fontWeight:600}}>{String((r.descriere||r.denumire||r.categorie||''))}</div><div style={{fontWeight:600}}>{fm(r.sumaEUR||r.suma||0)}</div></div>
+        <div className="row-field"><div className="text-xs text-slate-500">{r.date||r.termen||''}</div><div className="text-xs text-slate-500">{r.valuta||''}</div></div>
+      </div>))}
+    </div>);
+  }
+  return (<div className={compact?"overflow-x-hidden table-wrapper":"overflow-x-auto -mx-4 sm:mx-0 touch-pan-x table-wrapper"}><table className={compact?"w-full table-fixed text-sm":"min-w-[1000px] text-sm"}><thead><tr>{head.map(h=>(<th key={h} className="text-left px-4 py-2 bg-slate-50 whitespace-nowrap">{h}</th>))}</tr></thead><tbody>{rows.map((r,i)=>(<tr key={i} className="border-t odd:bg-slate-50/40">{renderRow(r,i)}</tr>))}</tbody></table></div>);
+});
 const Field=({label,children,className=""}:{label:string;children:React.ReactNode;className?:string})=> (<label className={`text-xs ${className}`}><div className="text-[11px] text-slate-500 mb-1">{label}</div>{children}</label>);
 
 // ===== forms
@@ -107,7 +184,7 @@ function PageMonth({monthKey,month,rates,addPlanner,updatePlannerRow,updatePlann
 
 function PageAnnual({entries,rates}:{entries:Record<string,any>;rates:any}){const months=Object.keys(entries).sort();const rows=months.map(m=>{const M=entries[m],v=sumE(M.incomes),c=sumE(M.expenses),sold=v-c,e=v?sold/v:0,vS=sumIf(M.incomes,(i:any)=>i.client==="Studio"),inv=sumIf(M.expenses,(e:any)=>e.categorie==="investitii"),cred=sumIf(M.expenses,(e:any)=>e.categorie==="credite"),d=M.planner.filter((p:Plan)=>isC(p)).reduce((s:number,p:Plan)=>s+restE(p,rates),0);return{m,v,c,sold,e,vS,inv,cred,d}});const tV=rows.reduce((s,r)=>s+r.v,0),tC=rows.reduce((s,r)=>s+r.c,0),tS=tV-tC;return(<Section title="Total anual (EUR)"><div className="grid grid-cols-3 gap-3 mb-3"><KPI label="Venituri an" value={fm(tV)}/><KPI label="Cheltuieli an" value={fm(tC)}/><KPI label="Sold an" value={fm(tS)}/></div><Table head={["Luna","Venituri","Cheltuieli","Sold","Economii %","Venit studio","Investiții","Credite","Datorii rămase"]} rows={rows} renderRow={(r:any)=>(<><td className="px-4 py-2">{r.m}</td><td className="px-4 py-2">{fm(r.v)}</td><td className="px-4 py-2">{fm(r.c)}</td><td className="px-4 py-2 font-semibold">{fm(r.sold)}</td><td className="px-4 py-2">{fp(r.e)}</td><td className="px-4 py-2">{fm(r.vS)}</td><td className="px-4 py-2">{fm(r.inv)}</td><td className="px-4 py-2">{fm(r.cred)}</td><td className="px-4 py-2">{fm(r.d)}</td></>)}/></Section>)}
 
-function PageSettings({rates,setRates,entries,setEntries,backup,setBackup,onBackupNow,cloud,setCloud,pwaReady,installPWA}:any){
+function PageSettings({rates,setRates,entries,setEntries,backup,setBackup,onBackupNow,cloud,setCloud,pwaReady,installPWA,userEmail,notify,remoteProjects,loadRemoteProject,downloadRemoteProject,exportRemoteProjectToEmail,saveProject,deleteProject,renameProject,addEditor,removeEditor,syncingProjects,cancelInvite}:any){
   const [mergeImport,setMergeImport]=React.useState(true);
   const exportJSON=()=>{const blob=new Blob([JSON.stringify({rates,entries,backup,cloud},null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`buget-export-${Date.now()}.json`;a.click();URL.revokeObjectURL(url)};
   const kInc=(i:any)=>[i.date,i.client,i.descriere,i.valuta,i.suma].join('|');
@@ -121,20 +198,152 @@ function PageSettings({rates,setRates,entries,setEntries,backup,setBackup,onBack
   } return out};
   const importJSON=(f:File)=>{const rd=new FileReader();rd.onload=()=>{try{const d=JSON.parse(rd.result as string); if(d?.rates) setRates(d.rates); if(d?.entries){const src=migrate(d.entries); setEntries((E:any)=> mergeImport? mergeEntries(E,src): src);} if(d?.backup) setBackup(d.backup); if(d?.cloud) setCloud(d.cloud);}catch{}};rd.readAsText(f)};
   const nextText=backup?.enabled&&backup?.nextAt?new Date(backup.nextAt).toLocaleString("ro-RO"):"—";
-  const test=()=>{const ok=fbInit(cloud?.cfg||"");alert(ok?"Config valid / autentificat":"Config invalid (verifică apiKey, projectId, appId)")};
-  const push=async()=>{if(!fbInit(cloud?.cfg||""))return alert("Config invalid");const r=ref(cloud?.budgetId||"");if(!r)return alert("Lipsește budgetId");await setDoc(r,{rates,entries,backup,updatedAt:Date.now()},{merge:true});alert("Trimis în cloud")};
+  const test=()=>{const ok=fbInit(cloud?.cfg||""); if(notify) ok?notify('success','Config valid / autentificat'):notify('error','Config invalid (verifică apiKey, projectId, appId)'); };
+  const [inviteEmail,setInviteEmail]=React.useState("");
+  const [inviteSending,setInviteSending]=React.useState(false);
+  const [inviteProjectId,setInviteProjectId]=React.useState<string|undefined>(undefined);
+  const [authEmail,setAuthEmail]=React.useState("");
+  const [authPass,setAuthPass]=React.useState("");
+  const [authPassConfirm,setAuthPassConfirm]=React.useState("");
+  // Ensure settings auto-fill cloud.cfg with the embedded default config when missing
+  React.useEffect(()=>{
+    try{
+      if(!cloud?.cfg){ setCloud((c:any)=>({...c, cfg: JSON.stringify(DEFAULT_FIREBASE_CONFIG)})); }
+    }catch(e){}
+  // run once when component mounts or when cloud reference changes
+  },[cloud?.cfg,setCloud]);
+  const sendInvite=async()=>{
+    if(!inviteEmail) return notify?notify('error','Introduce email'):(alert('Introduce email'));
+    if(!inviteProjectId) return notify?notify('error','Select a project to invite the user into'):(alert('Select a project'));
+    if(!cloud?.budgetId) return notify?notify('error','Budget ID is required in settings to store invites.'):(alert('Budget ID is required in settings to store invites.'));
+    setInviteSending(true);
+    try{
+      // Initialize firebase: try cloud cfg first, then fallback to embedded default
+      let inited = fbInit(cloud?.cfg);
+      if(!inited){ console.warn('fbInit(cloud.cfg) failed, falling back to embedded config'); inited = fbInit(undefined); if(inited){ notify&&notify('info','Using embedded Firebase config fallback'); } }
+      if(!inited) throw new Error('Firebase initialization failed (no valid config)');
+
+  // Include projectId in the continue URL so we can attach user to project after sign-in
+  const actionCodeSettings = { url: `${window.location.origin}?inviteProject=${encodeURIComponent(inviteProjectId)}`, handleCodeInApp: true };
+      if(!(_auth && typeof sendSignInLinkToEmail === 'function')) throw new Error('Firebase Auth not initialized');
+
+      // attempt to send the magic link
+      await sendSignInLinkToEmail(_auth, inviteEmail, actionCodeSettings);
+
+      // Store pending invite in Firestore under the specific project document (best-effort)
+      try{
+        const pDoc = doc(_db,'projects',inviteProjectId);
+        if(pDoc){ await setDoc(pDoc,{pendingInvites: arrayUnion(inviteEmail)},{merge:true}); }
+      }catch(e){ console.warn('Failed to write invite to Firestore', e); }
+
+      window.localStorage.setItem('buget_invite_email', inviteEmail);
+      notify&&notify('success','Invite sent. Check inbox and open the link on the device to sign in.');
+      console.log('sendInvite success', {email: inviteEmail, budgetId: cloud.budgetId});
+    }catch(e:any){
+      console.error('sendInvite error', e);
+      // Surface error code/message if available
+      const errMsg = e?.code ? `${e.code} - ${e.message||String(e)}` : (e?.message||String(e));
+      notify?notify('error',`Invite failed: ${errMsg}`):(alert('Invite failed: '+errMsg));
+      // Helpful suggestions for common failures
+      console.info('Diagnostics: Ensure Email Link sign-in is enabled in Firebase Console, and that your authorized domains include the app origin.');
+    }finally{
+      setInviteSending(false);
+    }
+  };
+
+  
+
+  // Auth helpers
+  const registerWithEmail=async()=>{
+    try{
+      if(!fbInit(cloud?.cfg)) return alert('Config invalid');
+      if(!authEmail||!authPass) return notify?notify('error','Introduce email and password'):(alert('Introduce email and password'));
+      if(authPass.length<6) return notify?notify('error','Parola trebuie sa aiba minim 6 caractere'):(alert('Parola trebuie sa aiba minim 6 caractere'));
+      if(authPass!==authPassConfirm) return notify?notify('error','Confirmarea parolei nu se potrivește'):(alert('Confirmarea parolei nu se potrivește'));
+      await createUserWithEmailAndPassword(_auth, authEmail, authPass);
+      if(notify) notify('success','Registered and signed in as '+authEmail);
+    }catch(e:any){console.error(e); if(notify) notify('error','Register failed: '+(e?.message||e));}
+  };
+  const loginWithEmail=async()=>{
+    try{
+      if(!fbInit(cloud?.cfg)) return alert('Config invalid');
+      await signInWithEmailAndPassword(_auth, authEmail, authPass);
+      if(notify) notify('success','Signed in as '+authEmail);
+    }catch(e:any){console.error(e); if(notify) notify('error','Login failed: '+(e?.message||e));}
+  };
+  const loginWithGoogle=async()=>{
+    try{
+      if(!fbInit(cloud?.cfg)) return notify?notify('error','Config invalid'):(null);
+      const provider = new GoogleAuthProvider();
+      await signInWithRedirect(_auth, provider);
+    }catch(e:any){console.error(e); if(notify) notify('error','Google sign-in failed: '+(e?.message||e));}
+  };
+  const resetPassword=async()=>{
+    try{
+      if(!authEmail) return notify?notify('error','Introduce email pentru reset'):(null);
+      if(!fbInit(cloud?.cfg)) return notify?notify('error','Config invalid'):(null);
+      await sendPasswordResetEmail(_auth, authEmail);
+      if(notify) notify('info','Email pentru reset trimis');
+    }catch(e:any){console.error(e); if(notify) notify('error','Reset failed: '+(e?.message||e));}
+  };
+  const doSignOut=async()=>{
+    try{ if(!_auth) return; await signOut(_auth); if(notify) notify('info','Signed out'); }catch(e:any){console.error(e); if(notify) notify('error','Sign out failed: '+(e?.message||e)); }
+  };
+  const push=async()=>{if(!fbInit(cloud?.cfg))return notify?notify('error','Config invalid'):(null);const r=ref(cloud?.budgetId||"");if(!r)return notify?notify('error','Lipsește budgetId'):(null);await setDoc(r,{rates,entries,backup,updatedAt:Date.now()},{merge:true}); if(notify) notify('success','Trimis în cloud');};
+  // Modal state for replacing prompt/confirm flows in Projects
+  const [modalOpen,setModalOpen] = React.useState(false);
+  const [modalType,setModalType] = React.useState<string| null>(null);
+  const [modalProject,setModalProject] = React.useState<any>(null);
+  const [modalValue,setModalValue] = React.useState<string>("");
+  const [modalBusy,setModalBusy] = React.useState(false);
+  const openModal = (type:string, project?:any, initialValue = "")=>{ setModalType(type); setModalProject(project||null); setModalValue(initialValue||""); setModalOpen(true); };
+  const closeModal = ()=>{ setModalOpen(false); setModalType(null); setModalProject(null); setModalValue(""); };
+  const confirmModal = async()=>{
+    if(!modalType) return closeModal();
+    // Capture values then close modal immediately to avoid blocking UI
+    const type = modalType; const project = modalProject; const value = modalValue;
+    closeModal();
+    setModalBusy(true);
+    try{
+      if(type==="rename" && project) await renameProject(project.id, value);
+      else if(type==="addEditor" && project) await addEditor(project.id, value);
+      else if(type==="removeEditor" && project) await removeEditor(project.id, value);
+      else if(type==="delete" && project) await deleteProject(project.id);
+      else if(type==="save") await saveProject(undefined, value);
+    }catch(e:any){ console.error('confirmModal error', e); notify && notify('error','Acțiune eșuată: '+(e?.message||e)); }
+    setModalBusy(false);
+  };
+
   return(<div className="space-y-6">
     <Section title="Curs valutar (bază EUR)"><div className="grid grid-cols-2 gap-3">
+      {remoteProjects&&remoteProjects.map((p:any)=>(<div key={p.id} className="flex items-center gap-2">{/** duplicate to add remove editor button below each entry */}</div>))}
       <Field label="RON per 1 EUR"><input inputMode="decimal" value={rates.ronPerEur} onChange={e=>setRates((r:any)=>({...r,ronPerEur:parseFloat((e.target as any).value)||0}))} className="w-full border rounded-xl p-2"/></Field>
       <Field label="MDL per 1 EUR"><input inputMode="decimal" value={rates.mdlPerEur} onChange={e=>setRates((r:any)=>({...r,mdlPerEur:parseFloat((e.target as any).value)||0}))} className="w-full border rounded-xl p-2"/></Field>
     </div></Section>
-    <Section title="Sincronizare online (Firebase)"><div className="grid grid-cols-2 gap-3">
+  <Section title="Sincronizare online (Firebase)"><div className="grid grid-cols-2 gap-3">
       <Field label="Activ"><input type="checkbox" checked={!!cloud.enabled} onChange={e=>setCloud((c:any)=>({...c,enabled:(e.target as any).checked}))}/></Field>
       <Field label="Budget ID"><input value={cloud.budgetId||""} onChange={e=>setCloud((c:any)=>({...c,budgetId:(e.target as any).value}))} className="w-full border rounded-xl p-2" placeholder="ex: buget-familie"/></Field>
-      <Field label="Config JSON" className="col-span-2"><textarea rows={4} value={cloud.cfg||""} onChange={e=>setCloud((c:any)=>({...c,cfg:(e.target as any).value}))} className="w-full border rounded-xl p-2" placeholder='{"apiKey":"…","authDomain":"…","projectId":"…","appId":"…"}'/></Field>
-      <div className="col-span-2 flex gap-3"><button onClick={test} className="px-4 py-2 rounded-xl border">Conectează/Test</button><button onClick={push} className="px-4 py-2 rounded-xl bg-black text-white font-semibold">Salvează remote</button></div>
+  <Field label="Firebase (autofill)" className="col-span-2"><div className="p-2 border rounded-xl text-sm">Using embedded Firebase config. API key: <b style={{wordBreak:'break-all'}}>{DEFAULT_FIREBASE_CONFIG.apiKey}</b><br/>Project: <b>{DEFAULT_FIREBASE_CONFIG.projectId}</b></div></Field>
+  <div className="col-span-2 flex gap-3"><button onClick={test} className="px-4 py-2 rounded-xl border">Conectează/Test</button><button onClick={push} className="px-4 py-2 rounded-xl bg-black text-white font-semibold">Salvează remote</button></div>
       <div className="col-span-2 text-xs text-slate-500">Sincronizare în timp real. Politică: ultima scriere câștigă (LWW).</div>
     </div></Section>
+    <Section title="Autentificare">
+      <div className="grid grid-cols-2 gap-3">
+        <div className="col-span-2 text-sm">Logged in as: <b>{userEmail||'—'}</b></div>
+        {!userEmail && (<>
+          <Field label="Email"><input value={authEmail} onChange={e=>setAuthEmail((e.target as any).value)} className="w-full border rounded-xl p-2"/></Field>
+          <Field label="Parolă"><input type="password" value={authPass} onChange={e=>setAuthPass((e.target as any).value)} className="w-full border rounded-xl p-2"/></Field>
+          <Field label="Confirmă parolă"><input type="password" value={authPassConfirm} onChange={e=>setAuthPassConfirm((e.target as any).value)} className="w-full border rounded-xl p-2"/></Field>
+          <div className="col-span-2 flex gap-2"><button onClick={registerWithEmail} className="px-4 py-2 rounded-xl border">Înregistrează</button><button onClick={loginWithEmail} className="px-4 py-2 rounded-xl bg-black text-white">Conectează</button></div>
+        </>)}
+        {!userEmail ? (
+          <div className="col-span-2 flex gap-2"><button onClick={loginWithGoogle} className="px-4 py-2 rounded-xl border">Sign in with Google</button></div>
+        ) : (
+          <div className="col-span-2 flex gap-2"><button onClick={doSignOut} className="px-4 py-2 rounded-xl">Logout</button></div>
+        )}
+        <div className="col-span-2 flex gap-2"><button onClick={resetPassword} className="px-4 py-2 rounded-xl border">Reset password</button></div>
+      </div>
+    </Section>
     <Section title="Backup automat pe e-mail / Import"><div className="grid grid-cols-2 gap-3">
       <Field label="Email destinat"><input value={backup.email||""} onChange={e=>setBackup((b:any)=>({...b,email:(e.target as any).value}))} className="w-full border rounded-xl p-2" placeholder="ex: nume@domeniu.com"/></Field>
       <Field label="Periodicitate"><select value={String(backup.freqDays||1)} onChange={e=>setBackup((b:any)=>({...b,freqDays:parseInt((e.target as any).value)||1}))} className="w-full border rounded-xl p-2"><option value="1">La 1 zi</option><option value="7">La 7 zile</option><option value="30">La 30 zile</option></select></Field>
@@ -155,6 +364,80 @@ function PageSettings({rates,setRates,entries,setEntries,backup,setBackup,onBack
         <div className="text-xs text-slate-500">Pe iPhone: deschide în Safari → Share → <b>Add to Home Screen</b>. (iOS nu afișează buton automat).</div>
       </div>
     </Section>
+  <Section title="Invită colaboratori">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Alege proiect" className="col-span-2">
+          <select value={inviteProjectId||""} onChange={e=>setInviteProjectId((e.target as any).value||undefined)} className="w-full border rounded-xl p-2">
+            <option value="">-- alege proiect --</option>
+            {remoteProjects?.map((p:any)=> (<option key={p.id} value={p.id}>{p.name||p.id} {p._fallback? '(Local)':''}</option>))}
+            {/* include locally-saved projects from local_projects_v1 */}
+            {(()=>{try{const raw=window.localStorage.getItem('local_projects_v1'); if(raw){ const local=JSON.parse(raw) as any[]; return local.filter((x:any)=>x.owner===userEmail).map((p:any)=>(<option key={p.id} value={p.id}>{p.name||p.id} (Local)</option>)); }}catch(e){} return null; })()}
+          </select>
+        </Field>
+        <Field label="Email colaborator" className="col-span-2"><input value={inviteEmail} onChange={e=>setInviteEmail((e.target as any).value)} className="w-full border rounded-xl p-2" placeholder="nume@exemplu.com"/></Field>
+  <div className="col-span-2"><button onClick={sendInvite} disabled={inviteSending} className="w-full py-2 rounded-xl bg-black text-white font-semibold">{inviteSending? 'Se trimite...' : 'Trimite invitație'}</button></div>
+        <div className="col-span-2 text-xs text-slate-500">Invitația trimite un link magic (email) — acceptarea привилегирует автоматический вход на устройстве получателя.</div>
+        <div className="col-span-2"><div className="text-sm">Signed in as: <b>{userEmail||'—'}</b></div></div>
+      </div>
+    </Section>
+    <Section title="Proiecte remote">
+      <div className="grid grid-cols-1 gap-3">
+        <div className="text-sm text-slate-500">Proiectele tale stocate în cloud. Poți încărca proiectul curent, descărca sau exporta pe email.</div>
+          <div className="space-y-2">
+          {(!remoteProjects||remoteProjects.length===0) && (<div className="text-slate-500">Nu există proiecte.</div>)}
+          {remoteProjects&&remoteProjects.map((p:any)=>(
+            <div key={p.id} className="flex items-center gap-2">
+              <div className="flex-1">
+                <span style={{fontWeight:600}}>{p.name||p.id}</span> <span className="text-xs text-slate-400">({p.id})</span>
+                {' '}
+                {syncingProjects?.includes(p.id) ? (<span className="text-xs px-2 py-1 rounded-full bg-yellow-100 text-yellow-800 ml-2">Syncing…</span>) : p._fallback ? (<span className="text-xs px-2 py-1 rounded-full bg-slate-100 text-slate-600 ml-2">Local</span>) : (<span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700 ml-2">Synced</span>)}
+                {Array.isArray(p.pendingInvites) && p.pendingInvites.length>0 && (
+                  <div style={{marginTop:6}} className="text-xs text-slate-600">Pending invites:
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {p.pendingInvites.map((em:string)=> (
+                        <div key={em} className="px-2 py-1 rounded-full bg-yellow-50 text-yellow-800 text-xs flex items-center gap-2">
+                          <span>{em}</span>
+                          {p.owner===userEmail && (<button onClick={()=>cancelInvite&&cancelInvite(p.id,em)} className="text-xs underline">Cancel</button>)}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={()=>loadRemoteProject(p.id)} className="px-3 py-1 rounded-xl border">Load</button>
+                <button onClick={()=>downloadRemoteProject(p.id)} className="px-3 py-1 rounded-xl border">Download</button>
+                <button onClick={()=>exportRemoteProjectToEmail(p.id, backup.email)} className="px-3 py-1 rounded-xl border">Export→Email</button>
+                <button onClick={()=>openModal('rename', p, p.name||p.id)} className="px-3 py-1 rounded-xl border">Rename</button>
+                <button onClick={()=>openModal('addEditor', p, '')} className="px-3 py-1 rounded-xl border">Add editor</button>
+                <button onClick={()=>openModal('removeEditor', p, '')} className="px-3 py-1 rounded-xl border">Remove editor</button>
+                <button onClick={()=>openModal('delete', p, '')} className="px-3 py-1 rounded-xl border text-red-600">Delete</button>
+              </div>
+            </div>
+          ))}
+          <div className="mt-3"><button onClick={()=>openModal('save', undefined, '')} className="px-4 py-2 rounded-xl bg-black text-white">Save current as project</button></div>
+        </div>
+      </div>
+    </Section>
+    {/* Modal for project actions (rename/add/remove/delete/save) */}
+    {modalOpen && (
+      <div style={{position:'fixed',left:0,top:0,right:0,bottom:0,background:'rgba(0,0,0,0.4)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000}}>
+        <div style={{background:'white',padding:20,borderRadius:12,minWidth:320,maxWidth:'90%'}}>
+          <div style={{fontWeight:700,marginBottom:8}}>{modalType==='rename'?'Rename project':modalType==='addEditor'?'Add editor':modalType==='removeEditor'?'Remove editor':modalType==='delete'?'Delete project':'Save project'}</div>
+          {modalType==='delete' ? (
+            <div style={{marginBottom:12}}>Are you sure you want to delete <b>{modalProject?.name||modalProject?.id}</b>?</div>
+          ) : (
+            <div style={{marginBottom:12}}>
+              <input value={modalValue} onChange={e=>setModalValue((e.target as any).value)} placeholder={modalType==='rename'?'New project name':modalType==='addEditor'?'Editor email':modalType==='removeEditor'?'Editor email':''} className="w-full border rounded-xl p-2" />
+            </div>
+          )}
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+            <button onClick={closeModal} className="px-3 py-2 rounded-xl border" disabled={modalBusy}>Cancel</button>
+            <button onClick={confirmModal} className="px-3 py-2 rounded-xl bg-black text-white" disabled={modalBusy}>{modalBusy? 'Așteaptă...' : 'Confirm'}</button>
+          </div>
+        </div>
+      </div>
+    )}
   </div>)}
 
 // ===== app
@@ -164,16 +447,411 @@ let _pwaEvt:any=null; export default function App(){
   const[E,setE]=useState(migrate(S?.entries)||{[todayYM]:emptyM()});
   const[B,setB]=useState(S?.backup||{email:"",freqDays:1,enabled:false,nextAt:0});
   const[C,setC]=useState(S?.cloud||CLOUD_DEF);
+  const [remoteProjects,setRemoteProjects]=useState<Array<any>>([]);
+  const [syncingProjects,setSyncingProjects]=useState<string[]>([]);
   const[tab,setTab]=useState("add"); const[pwaReady,setPwaReady]=useState(false);
+  const [userEmail,setUserEmail]=useState<string|undefined>(undefined);
+  // Notifications (simple toasts)
+  const [notifs,setNotifs]=useState<{id:number,type:'info'|'success'|'error',msg:string}[]>([]);
+  const pushNotif=(type:'info'|'success'|'error', msg:string, ttl=5000)=>{const id=Date.now()+Math.floor(Math.random()*1000); setNotifs(s=>[...s,{id,type,msg}]); setTimeout(()=>setNotifs(s=>s.filter(x=>x.id!==id)), ttl); };
+
+  // When a user signs-in (via email link or regular), check if their email appears in any project's pendingInvites
+  // and if so, add them to editors and remove from pendingInvites. This is in App scope so it can be called
+  // right after auth resolves.
+  const processPendingInvitesForEmail = async(email?:string)=>{
+    if(!email) return;
+    try{
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      if(!_db) return;
+      const q = query(collection(_db,'projects'), where('pendingInvites','array-contains', email));
+      const snap = await getDocs(q);
+      for(const docSnap of snap.docs){
+        const pid = docSnap.id; const data:any = docSnap.data();
+        const editors = Array.from(new Set([...(data.editors||[]), email]));
+        await setDoc(doc(_db,'projects',pid), {editors, pendingInvites: arrayRemove(email)},{merge:true});
+        pushNotif('success',`Ai fost adăugat la proiectul ${data.name||pid}`);
+        // notify the project owner that the invite was accepted
+        try{
+          if(data.owner){ await addDoc(collection(_db,'notifications'), {to: data.owner, from: email, projectId: pid, projectName: data.name||pid, type: 'invite_accepted', createdAt: serverTimestamp()}); }
+        }catch(e){ console.warn('notify owner failed', e); }
+      }
+    }catch(e){ console.error('processPendingInvitesForEmail', e); }
+  };
+
+  
+
+  // Auth state listener
+  useEffect(()=>{
+    try{
+      if(!fbInit(C.cfg, false)) return; // ensure _auth is set
+      const unsub = onAuthStateChanged(_auth, (user:any)=>{
+        if(user){ setUserEmail(user.email||user?.providerData?.[0]?.email||undefined); processPendingInvitesForEmail(user.email||user?.providerData?.[0]?.email); }
+        else setUserEmail(undefined);
+      });
+      return ()=>unsub();
+    }catch(e){console.error(e)}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
+  // Listen for notifications targeted to the signed-in user and show them as toasts
+  useEffect(()=>{
+    if(!userEmail) return;
+    if(!fbInit(C.cfg)) fbInit(undefined);
+    if(!_db) return;
+    const q = query(collection(_db,'notifications'), where('to','==', userEmail));
+    const unsub = onSnapshot(q, async(snap)=>{
+      for(const d of snap.docChanges()){
+        if(d.type==='added'){
+          const n:any = d.doc.data();
+          try{ pushNotif('info', n.type==='invite_accepted'? `User ${n.from} accepted invite to project ${n.projectName||n.projectId}` : 'Notification'); }catch(e){}
+          try{ await deleteDoc(d.doc.ref); }catch(e){}
+        }
+      }
+    });
+    return ()=>unsub();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[userEmail]);
 
   // local save + cloud push
   useEffect(()=>{const t=setTimeout(()=>{const snap={rates:r,entries:E,backup:B,cloud:C}; save(snap); if(C?.enabled&&C?.budgetId&&fbInit(C?.cfg||"")){const rf=ref(C.budgetId); if(rf&&!_pull)setDoc(rf,{rates:r,entries:E,backup:B,updatedAt:Date.now()},{merge:true});}},250); return()=>clearTimeout(t)},[r,E,B,C]);
   // PWA hooks
   useEffect(()=>{if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(()=>{});} const h=(e:any)=>{e.preventDefault(); _pwaEvt=e; setPwaReady(true)}; window.addEventListener('beforeinstallprompt',h); return()=>window.removeEventListener('beforeinstallprompt',h)},[]);
+  // Email link auth handling on load
+  useEffect(()=>{
+    try{
+      if(!fbInit(C.cfg, false)) return; // init firebase without anonymous sign-in
+      const url = window.location.href;
+      if(isSignInWithEmailLink(_auth, url)){
+        let savedEmail = window.localStorage.getItem('buget_invite_email');
+        // If no saved email (invite sent from another device), prompt the user to input it
+        if(!savedEmail){
+          try{
+            // Use a friendly prompt; user must enter the same email that received the invite
+            const entered = window.prompt('Introduceți email-ul folosit pentru invitație (pentru finalizarea autentificării):');
+            if(entered && typeof entered === 'string') savedEmail = entered.trim();
+          }catch(e){ /* ignore */ }
+        }
+        if(savedEmail){
+          signInWithEmailLink(_auth, savedEmail, url).then((res)=>{ setUserEmail(res.user.email||undefined); pushNotif('success','Signed in as '+(res.user.email||'')); }).catch((e)=>{console.error(e); pushNotif('error','Sign-in failed: '+(e?.message||e));});
+        } else {
+          // Could not obtain email — inform the user about manual fallback
+          pushNotif('info','Nu am găsit e‑mail salvat pentru finalizarea autentificării. Introduceți e‑mailul folosit când vi se cere.');
+        }
+      }
+      // Also check for redirect result (Google redirect sign-in)
+      try{
+        getRedirectResult(_auth).then((result:any)=>{ if(result && result.user){ setUserEmail(result.user.email||undefined); pushNotif('success','Signed in as '+(result.user.email||'')); }}).catch(()=>{});
+      }catch(e){}
+    }catch(e){console.error(e)}
+  },[]);
   // recalc EUR on rate change
   useEffect(()=>{setE((E0:any)=>{const out:any={}; for(const k of Object.keys(E0||{})){const M=E0[k]||{incomes:[],expenses:[],planner:[]}; out[k]={...M, incomes:(M.incomes||[]).map((i:any)=>({...i,sumaEUR:toE(i.suma,i.valuta,r)})), expenses:(M.expenses||[]).map((x:any)=>({...x,sumaEUR:toE(x.suma,x.valuta,r)}))};} return out});},[r]);
   // cloud subscribe
-  useEffect(()=>{ if(!C?.enabled||!C?.budgetId||!C?.cfg) return; if(!fbInit(C.cfg)) return; const rf=ref(C.budgetId); if(!rf) return; const unsub=onSnapshot(rf,(snap)=>{const d:any=snap.data(); if(!d) return; _pull=true; setR(d.rates||rates0); setE(migrate(d.entries)||{[todayYM]:emptyM()}); setB(d.backup||{email:"",freqDays:1,enabled:false,nextAt:0}); setTimeout(()=>{_pull=false},300)}); return ()=>unsub(); },[C.enabled,C.budgetId,C.cfg]);
+  useEffect(()=>{ if(!C?.enabled||!C?.budgetId) return; if(!fbInit(C.cfg)) return; const rf=ref(C.budgetId); if(!rf) return; const unsub=onSnapshot(rf,(snap)=>{const d:any=snap.data(); if(!d) return; _pull=true; setR(d.rates||rates0); setE(migrate(d.entries)||{[todayYM]:emptyM()}); setB(d.backup||{email:"",freqDays:1,enabled:false,nextAt:0}); setTimeout(()=>{_pull=false},300)}); return ()=>unsub(); },[C.enabled,C.budgetId,C.cfg]);
+
+  // list remote projects when user signs in
+  const listRemoteProjects = async()=>{
+    try{
+      if(!userEmail) { setRemoteProjects([]); return; }
+      if(!fbInit(C.cfg)) { console.warn('fbInit failed while listing projects, trying fallback'); fbInit(undefined); }
+      if(!_db){ console.warn('Firestore not initialized'); setRemoteProjects([]); return; }
+      const q = query(collection(_db,'projects'), where('owner','==', userEmail));
+      const snap = await getDocs(q);
+      const arr = snap.docs.map(d=>({id:d.id, ...d.data()}));
+      // Merge with any locally-saved projects (local primary)
+      try{
+        const raw = window.localStorage.getItem('local_projects_v1');
+        if(raw){ const local = JSON.parse(raw) as any[]; const mine = (local||[]).filter((p:any)=>p.owner===userEmail); const byId = new Map(arr.map((a:any)=>[a.id,a])); for(const lp of mine){ if(!byId.has(lp.id)) arr.push(lp); else { /* overwrite remote with local if newer */ const remote = byId.get(lp.id); if(lp._fallback && (!remote || (lp.updatedAt>remote.updatedAt))) { const idx = arr.findIndex(a=>a.id===lp.id); if(idx>=0) arr[idx]=lp; } } }
+        }
+      }catch(e){console.warn('local projects merge failed', e)}
+      setRemoteProjects(arr as any[]);
+    }catch(e){ console.error('listRemoteProjects error', e); }
+  };
+
+  // Replace one-off listing with real-time listeners that update projects for the
+  // signed-in user (either owner or editor). Merge with any local fallback projects
+  // and clean up listeners on sign-out or settings change.
+  const ownerSnapRef = useRef<any>(null);
+  const editorSnapRef = useRef<any>(null);
+
+  const rebuildProjectsFromSnapshots = async () => {
+    try{
+      const docsMap = new Map<string, any>();
+      if(ownerSnapRef.current && ownerSnapRef.current.docs){ ownerSnapRef.current.docs.forEach((d:any)=>docsMap.set(d.id, {id:d.id, ...d.data()})); }
+      if(editorSnapRef.current && editorSnapRef.current.docs){ editorSnapRef.current.docs.forEach((d:any)=>docsMap.set(d.id, {id:d.id, ...d.data()})); }
+      let arr = Array.from(docsMap.values());
+      // Merge any local-only projects saved in local_projects_v1
+      try{
+        const raw = window.localStorage.getItem('local_projects_v1');
+        if(raw){ const local = JSON.parse(raw) as any[]; const mine = (local||[]).filter((p:any)=>p.owner===userEmail); const byId = new Map(arr.map((a:any)=>[a.id,a])); for(const lp of mine){ if(!byId.has(lp.id)) arr.push(lp); else { const remote = byId.get(lp.id); if(lp._fallback && (!remote || (lp.updatedAt>remote.updatedAt))){ const idx = arr.findIndex(a=>a.id===lp.id); if(idx>=0) arr[idx]=lp; } } } }
+      }catch(e){ console.warn('projects merge local failed', e); }
+      setRemoteProjects(arr as any[]);
+    }catch(e){ console.error('rebuildProjectsFromSnapshots', e); }
+  };
+
+  useEffect(()=>{
+    // if cloud sync not enabled or no user, clear and skip
+    if(!C?.enabled || !userEmail) { setRemoteProjects([]); return; }
+    if(!fbInit(C.cfg)) { console.warn('fbInit failed for projects listener, trying fallback'); fbInit(undefined); }
+    if(!_db){ console.warn('Firestore not initialized for projects listener'); return; }
+
+    const qOwner = query(collection(_db,'projects'), where('owner','==', userEmail));
+    const qEditor = query(collection(_db,'projects'), where('editors','array-contains', userEmail));
+
+    const unsubOwner = onSnapshot(qOwner, (snap)=>{ ownerSnapRef.current = snap; rebuildProjectsFromSnapshots(); }, (err:any)=>{ console.warn('owner projects onSnapshot error', err); });
+    const unsubEditor = onSnapshot(qEditor, (snap)=>{ editorSnapRef.current = snap; rebuildProjectsFromSnapshots(); }, (err:any)=>{ console.warn('editor projects onSnapshot error', err); });
+
+    // initial rebuild in case listeners return quickly
+    rebuildProjectsFromSnapshots();
+
+    return ()=>{ try{ unsubOwner(); }catch{} try{ unsubEditor(); }catch{} ownerSnapRef.current=null; editorSnapRef.current=null; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[userEmail, C?.enabled, C?.cfg]);
+
+  // Attempt to sync any locally saved projects to remote when online or when auth available
+  const trySyncLocalProjects = async()=>{
+    try{
+      const raw = window.localStorage.getItem('local_projects_v1');
+      if(!raw) return;
+      const local = JSON.parse(raw) as any[];
+      if(!local || local.length===0) return;
+      if(!userEmail) return; // only sync for signed-in user
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      if(!_db) return;
+      for(const p of local){
+        try{
+          // only attempt to sync projects owned by user
+          if(p.owner!==userEmail) continue;
+          // respect backoff metadata
+          const now = Date.now();
+          const nextAttempt = p._nextAttempt || 0;
+          if(nextAttempt && nextAttempt>now) continue; // skip until nextAttempt
+          await attemptSyncProject(p);
+        }catch(e){ console.warn('sync project failed', p.id, e); }
+      }
+      pushNotif('info','Local projects sync attempted');
+      await listRemoteProjects();
+    }catch(e){ console.error('trySyncLocalProjects', e); }
+  };
+
+  useEffect(()=>{ // sync on online
+    const onOnline = ()=>{ trySyncLocalProjects(); };
+    window.addEventListener('online', onOnline);
+    return ()=>window.removeEventListener('online', onOnline);
+  },[userEmail,C.cfg]);
+
+  useEffect(()=>{ // attempt sync when userEmail becomes available
+    if(userEmail) trySyncLocalProjects();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[userEmail]);
+
+  // Backoff helper: exponential backoff with jitter
+  const calcBackoff = (attempts:number)=>{
+    const base = 1000; // 1s
+    const max = 60*1000; // 1 minute
+    const exp = Math.min(max, base * Math.pow(2, attempts));
+    // jitter +/-20%
+    const jitter = Math.round(exp * 0.2 * (Math.random()*2 - 1));
+    return Math.max(1000, exp + jitter);
+  };
+
+  // Attempt to sync a single project with retry metadata persisted locally
+  const attemptSyncProject = async(p:any)=>{
+    if(!p || !p.id) return;
+    const id = p.id;
+    // mark syncing
+    setSyncingProjects(s=> (s.includes(id)?s:[...s,id]) );
+    try{
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      if(!_db) throw new Error('Firestore not available');
+      const docRef = doc(_db,'projects',id);
+      await setDoc(docRef, {...p, updatedAt: Date.now(), _syncedAt: Date.now()}, {merge:true});
+      // on success, update local storage record
+      try{
+        const raw = window.localStorage.getItem('local_projects_v1');
+        const local = raw? JSON.parse(raw) as any[] : [];
+        const idx = local.findIndex((x:any)=>x.id===id);
+        if(idx>=0){ local[idx] = {...local[idx], _fallback:false, _attempts:0, _nextAttempt:0, updatedAt: Date.now()}; window.localStorage.setItem('local_projects_v1', JSON.stringify(local)); }
+      }catch(e){/* ignore */}
+      pushNotif('success','Project synced: '+(p.name||id));
+      await listRemoteProjects();
+    }catch(e:any){
+      console.warn('attemptSyncProject error', id, e);
+      // persist retry metadata
+      try{
+        const raw = window.localStorage.getItem('local_projects_v1');
+        const local = raw? JSON.parse(raw) as any[] : [];
+        const idx = local.findIndex((x:any)=>x.id===id);
+        if(idx>=0){ const cur = local[idx]; const attempts = (cur._attempts||0)+1; const delay = calcBackoff(attempts); cur._attempts=attempts; cur._nextAttempt=Date.now()+delay; local[idx]=cur; window.localStorage.setItem('local_projects_v1', JSON.stringify(local)); }
+      }catch(e2){ console.error('save retry metadata failed', e2); }
+    }finally{
+      setSyncingProjects(s=>s.filter(x=>x!==id));
+    }
+  };
+
+  const loadRemoteProject = async(projectId:string)=>{
+    try{
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      const d = await getDoc(doc(_db,'projects',projectId));
+      if(!d.exists()) return pushNotif('error','Project not found');
+      const data:any = d.data();
+      // set rates/entries/backup from project doc
+      if(data.rates) setR(data.rates);
+      if(data.entries) setE(migrate(data.entries));
+      if(data.backup) setB(data.backup);
+      // set selected cloud project id so user can reference it
+      setC((c:any)=>({...c, projectId: projectId, budgetId: projectId}));
+      pushNotif('success','Project loaded');
+    }catch(e:any){ console.error('loadRemoteProject', e); pushNotif('error','Load failed: '+(e?.message||e)); }
+  };
+
+  // Save current local state as a remote project (creates or updates)
+  const saveProject = async(projectId?:string, name?:string)=>{
+    try{
+      if(!userEmail) return pushNotif('error','Trebuie să fii autentificat pentru a salva proiecte');
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      if(!_db) { pushNotif('error','Firestore not available'); return; }
+      // basic validation
+      const finalName = (name||`proj-${Date.now().toString(36)}`).trim();
+      if(!finalName) return pushNotif('error','Nume invalid');
+      const id = projectId|| (name? finalName.replace(/[^a-z0-9_-]/ig,'-').toLowerCase(): `proj-${Date.now().toString(36)}`);
+      const docRef = doc(_db,'projects',id);
+      const payload = { owner: userEmail, name: finalName||id, rates: r, entries: E, backup: B, updatedAt: Date.now(), editors: [userEmail] };
+
+      // Save locally immediately (primary store)
+      try{
+        const raw = window.localStorage.getItem('local_projects_v1');
+        const local = raw? JSON.parse(raw) as any[] : [];
+        const existingIdx = local.findIndex((x:any)=>x.id===id);
+        const toSaveLocal = {...payload, id, _fallback:true};
+        if(existingIdx>=0) local[existingIdx]=toSaveLocal; else local.push(toSaveLocal);
+        window.localStorage.setItem('local_projects_v1', JSON.stringify(local));
+        pushNotif('success','Project saved locally');
+        // update shown list immediately
+        await listRemoteProjects();
+      }catch(err:any){ console.error('local save failed', err); pushNotif('error','Local save failed: '+(err?.message||err)); }
+
+      // Enqueue remote sync attempt in background (do not block UI)
+      (async function remoteTry(){
+        try{
+          setSyncingProjects(s=> (s.includes(id)?s:[...s,id]) );
+          if(!fbInit(C.cfg)) fbInit(undefined);
+          if(!_db) throw new Error('Firestore not available');
+          await setDoc(docRef, {...payload, _syncedAt: Date.now()}, {merge:true});
+          // on success, remove _fallback flag from local copy
+          try{
+            const raw2 = window.localStorage.getItem('local_projects_v1');
+            const local2 = raw2? JSON.parse(raw2) as any[] : [];
+            const idx = local2.findIndex((x:any)=>x.id===id);
+            if(idx>=0){ local2[idx] = {...local2[idx], _fallback:false, updatedAt: Date.now()}; window.localStorage.setItem('local_projects_v1', JSON.stringify(local2)); }
+          }catch(e){/* ignore */}
+          pushNotif('success','Project synced to cloud');
+          await listRemoteProjects();
+        }catch(e:any){ console.warn('remote sync failed (will keep local):', e); }
+        finally{ setSyncingProjects(s=>s.filter(x=>x!==id)); }
+      })();
+      return id;
+    }catch(e:any){ console.error('saveProject', e); pushNotif('error','Save failed: '+(e?.message||e)); }
+  };
+
+  const deleteProject = async(projectId:string)=>{
+    try{
+      if(!userEmail) return pushNotif('error','Trebuie să fii autentificat pentru a șterge proiecte');
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      // check ownership
+      const d = await getDoc(doc(_db,'projects',projectId));
+      if(!d.exists()) return pushNotif('error','Project not found');
+      const data:any = d.data(); if(data.owner!==userEmail) return pushNotif('error','Only owner can delete the project');
+      await deleteDoc(doc(_db,'projects',projectId));
+      pushNotif('success','Project deleted');
+      listRemoteProjects();
+    }catch(e:any){ console.error('deleteProject', e); pushNotif('error','Delete failed: '+(e?.message||e)); }
+  };
+
+  const cancelInvite = async(projectId:string, email:string)=>{
+    try{
+      if(!userEmail) return pushNotif('error','Trebuie să fii autentificat');
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      const d = await getDoc(doc(_db,'projects',projectId));
+      if(!d.exists()) return pushNotif('error','Project not found');
+      const data:any = d.data(); if(data.owner!==userEmail) return pushNotif('error','Only owner can cancel invites');
+      await setDoc(doc(_db,'projects',projectId), {pendingInvites: arrayRemove(email)},{merge:true});
+      pushNotif('success','Invite cancelled');
+      // trigger refresh of projects list
+      try{ await listRemoteProjects(); }catch{}
+    }catch(e:any){ console.error('cancelInvite', e); pushNotif('error','Cancel invite failed: '+(e?.message||e)); }
+  };
+
+  const renameProject = async(projectId:string, newName:string)=>{
+    try{
+      if(!userEmail) return pushNotif('error','Trebuie să fii autentificat');
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      const d = await getDoc(doc(_db,'projects',projectId));
+      if(!d.exists()) return pushNotif('error','Project not found');
+      const data:any = d.data(); if(data.owner!==userEmail) return pushNotif('error','Only owner can rename');
+      await setDoc(doc(_db,'projects',projectId), {name:newName},{merge:true});
+      pushNotif('success','Project renamed');
+      listRemoteProjects();
+    }catch(e:any){ console.error('renameProject', e); pushNotif('error','Rename failed: '+(e?.message||e)); }
+  };
+
+  const addEditor = async(projectId:string, editorEmail:string)=>{
+    try{
+      if(!userEmail) return pushNotif('error','Trebuie să fii autentificat');
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      const d = await getDoc(doc(_db,'projects',projectId));
+      if(!d.exists()) return pushNotif('error','Project not found');
+      const data:any = d.data(); if(data.owner!==userEmail) return pushNotif('error','Only owner can add editors');
+      const editors = Array.from(new Set([...(data.editors||[]), editorEmail]));
+      await setDoc(doc(_db,'projects',projectId), {editors},{merge:true});
+      pushNotif('success','Editor added'); listRemoteProjects();
+    }catch(e:any){ console.error('addEditor', e); pushNotif('error','Add editor failed: '+(e?.message||e)); }
+  };
+
+  const removeEditor = async(projectId:string, editorEmail:string)=>{
+    try{
+      if(!userEmail) return pushNotif('error','Trebuie să fii autentificat');
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      const d = await getDoc(doc(_db,'projects',projectId));
+      if(!d.exists()) return pushNotif('error','Project not found');
+      const data:any = d.data(); if(data.owner!==userEmail) return pushNotif('error','Only owner can remove editors');
+      const editors = (data.editors||[]).filter((e:string)=>e!==editorEmail);
+      await setDoc(doc(_db,'projects',projectId), {editors},{merge:true});
+      pushNotif('success','Editor removed'); listRemoteProjects();
+    }catch(e:any){ console.error('removeEditor', e); pushNotif('error','Remove editor failed: '+(e?.message||e)); }
+  };
+
+  const downloadRemoteProject = async(projectId:string)=>{
+    try{
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      const d = await getDoc(doc(_db,'projects',projectId));
+      if(!d.exists()) return pushNotif('error','Project not found');
+      const data = d.data();
+      const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = `buget-project-${projectId}.json`; a.click(); URL.revokeObjectURL(url);
+      pushNotif('success','Project downloaded');
+    }catch(e:any){ console.error('downloadRemoteProject', e); pushNotif('error','Download failed: '+(e?.message||e)); }
+  };
+
+  const exportRemoteProjectToEmail = async(projectId:string, toEmail?:string)=>{
+    try{
+      if(!fbInit(C.cfg)) fbInit(undefined);
+      const d = await getDoc(doc(_db,'projects',projectId));
+  if(!d.exists()) return pushNotif('error','Project not found');
+      const data = d.data();
+      const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      // trigger download and open mailto to instruct attaching file (no SMTP backend here)
+      const a = document.createElement('a'); a.href = url; a.download = `buget-project-${projectId}.json`; a.click(); URL.revokeObjectURL(url);
+      const subject = encodeURIComponent(`Buget project export: ${projectId}`);
+      const body = encodeURIComponent(`Attached is the exported project file for ${projectId}.
+Please attach the downloaded file to this email before sending.`);
+      const mailto = `mailto:${encodeURIComponent(toEmail||'')}?subject=${subject}&body=${body}`;
+      window.open(mailto,'_blank');
+      pushNotif('success','Export prepared. Attach the downloaded file to the opened email to send.');
+  }catch(e:any){ console.error('exportRemoteProjectToEmail', e); pushNotif('error','Export failed: '+(e?.message||e)); }
+  };
 
   // helpers CRUD
   const ensure=(k:string)=>setE((EE:any)=>({...EE,[k]:EE[k]||emptyM()}));
@@ -246,7 +924,7 @@ let _pwaEvt:any=null; export default function App(){
       )}
       {tab==="annual"&&(<PageAnnual entries={E} rates={r}/>)}
       {tab==="settings"&&(
-        <PageSettings
+      <PageSettings
           rates={r}
           setRates={setR}
           entries={E}
@@ -258,9 +936,38 @@ let _pwaEvt:any=null; export default function App(){
           setCloud={setC}
           pwaReady={pwaReady}
           installPWA={installPWA}
+        userEmail={userEmail}
+        notify={pushNotif}
+        remoteProjects={remoteProjects}
+        loadRemoteProject={loadRemoteProject}
+        downloadRemoteProject={downloadRemoteProject}
+        exportRemoteProjectToEmail={exportRemoteProjectToEmail}
+          saveProject={saveProject}
+          deleteProject={deleteProject}
+          renameProject={renameProject}
+          addEditor={addEditor}
+          removeEditor={removeEditor}
+          syncingProjects={syncingProjects}
+          cancelInvite={cancelInvite}
         />
       )}
-    </div></div>
+    </div>
+    {/* toasts */}
+    <div style={{position:'fixed',right:12,top:12,zIndex:9999}}>
+      {notifs.map(n=> (
+        <div key={n.id} style={{marginBottom:8,background:n.type==='error'?'#fee2e2':n.type==='success'?'#ecfdf5':'#f0f9ff',padding:'8px 12px',borderRadius:8,boxShadow:'0 2px 6px rgba(0,0,0,0.08)'}}>
+          <div style={{fontSize:13,fontWeight:600,color:n.type==='error'?'#b91c1c':n.type==='success'?'#065f46':'#0f172a'}}>{n.msg}</div>
+        </div>
+      ))}
+    </div>
+    {/* Mobile bottom nav */}
+    <div className="bottom-nav">
+      <button onClick={()=>setTab('add')} className={tab==='add'?"bg-black text-white":"bg-white"}>Adaugă</button>
+      <button onClick={()=>setTab('month')} className={tab==='month'?"bg-black text-white":"bg-white"}>Lună</button>
+      <button onClick={()=>setTab('annual')} className={tab==='annual'?"bg-black text-white":"bg-white"}>Anual</button>
+      <button onClick={()=>setTab('settings')} className={tab==='settings'?"bg-black text-white":"bg-white"}>Setări</button>
+    </div>
+    </div>
   );
 }
 // end of file

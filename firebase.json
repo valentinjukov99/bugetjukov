@@ -1,6 +1,6 @@
 {
   "hosting": {
-    "public": "/Users/macbook/buget",
+    "public": "dist",
     "ignore": [
       "firebase.json",
       "**/.*",
