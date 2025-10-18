@@ -1,3 +1,4 @@
+```typescript
 // Minimal IndexedDB helper for storing projects under 'projects' store
 const DB_NAME = 'buget-db-v1';
 const STORE = 'projects';
@@ -81,3 +82,5 @@ export async function migrateFromLocalStorage(): Promise<void>{
 }
 
 export default { openDB, getAllProjects, getProject, putProject, clearProjects, migrateFromLocalStorage };
+
+```
