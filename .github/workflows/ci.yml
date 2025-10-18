@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: "--max_old_space_size=4096"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Preview server
+        run: |
+          npx http-server dist -p 5173 &
+          sleep 1
+        # Use a lightweight static server to serve built assets for Playwright
+
+      - name: Wait for server
+        run: |
+          for i in {1..20}; do curl -sS http://localhost:5173/ -o /tmp/ci_index.html && break || sleep 1; done
+
+      - name: Run Playwright tests
+        uses: microsoft/playwright-github-action@v1
+        with:
+          version: 1.56.1
+          run: npx playwright test --reporter=github
+        env:
+          APP_URL: http://localhost:5173/
+
+      - name: Deploy to Firebase (main)
+        if: github.ref == 'refs/heads/main' && secrets.FIREBASE_TOKEN
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          npm run deploy:ci
