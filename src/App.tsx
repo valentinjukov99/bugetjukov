@@ -882,6 +882,24 @@ Please attach the downloaded file to this email before sending.`);
 
   const backupNow=()=>{const blob=new Blob([JSON.stringify({rates:r,entries:E},null,2)],{type:"application/json"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=`buget-backup-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.json`; a.click(); URL.revokeObjectURL(url); if(B?.email){const subject=encodeURIComponent(`Backup buget ${new Date().toLocaleString('ro-RO')}`); const body=encodeURIComponent('Fișierul JSON a fost descărcat automat. Atașează-l și trimite.'); try{window.open(`mailto:${B.email}?subject=${subject}&body=${body}`,'_blank')}catch{}}};
   useEffect(()=>{if(!B.enabled) return; if(!B.nextAt) setB((b:any)=>({...b,nextAt:Date.now()+(b.freqDays||1)*86400000})); const id=setInterval(()=>{if(!B.enabled) return; if(Date.now()>=(B.nextAt||0)){backupNow(); setB((b:any)=>({...b,nextAt:Date.now()+(b.freqDays||1)*86400000}))}},60000); return()=>clearInterval(id)},[B.enabled,B.nextAt,B.freqDays,r,E]);
+  // Test helpers and refs (guarded: only enabled in test/e2e mode)
+  const entriesRef = useRef(E);
+  useEffect(()=>{ entriesRef.current = E; },[E]);
+  // determine test mode: query ?e2e=1, runtime flag window.__E2E, or Vite test mode
+  const isTestMode = typeof window !== 'undefined' && ( (window as any).__E2E === true || (typeof location !== 'undefined' && location.search.indexOf('e2e=1')>=0) || (import.meta && (import.meta as any).env && (import.meta as any).env.MODE === 'test') );
+  useEffect(()=>{
+    if(!isTestMode) return;
+    try{
+      (window as any).__getAppEntries = ()=> entriesRef.current;
+      (window as any).__setAppEntries = (v:any)=> { try{ setE(v); }catch(e){} };
+      (window as any).__clearUI = ()=> { try{ setE({[todayYM]: emptyM()}); }catch(e){} };
+      (window as any).__loadRemoteProject = (id:string)=> { try{ return loadRemoteProject(id); }catch(e){} };
+    }catch(e){ console.warn('test helpers registration failed', e); }
+    return ()=>{
+      try{ delete (window as any).__getAppEntries; delete (window as any).__setAppEntries; delete (window as any).__clearUI; delete (window as any).__loadRemoteProject; }catch(e){}
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
 
   const months=useMemo(()=>Object.keys(E).sort(),[E]);
   const [mk,setMk]=useState(months[0]||todayYM);
