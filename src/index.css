@@ -1,16 +1,35 @@
 :root {
+  /* Typography */
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* Palette (pastel / muted tones) */
+  --color-beige-50: #FBF7F2; /* very light beige */
+  --color-beige-100: #F1E7D7; /* light beige */
+  --color-burgundy: #6E1E2B; /* deep burgundy */
+  --color-darkgreen: #1F4D3D; /* dark green */
+  --color-ink: #0F1722; /* near black for text */
+  --color-muted: #687074; /* muted gray-green */
+  --color-surface: #FFFFFF; /* surfaces / input backgrounds */
+  --color-shadow: rgba(15, 23, 34, 0.06);
+
+  /* UI tokens */
+  --bg: var(--color-beige-50);
+  --surface: var(--color-surface);
+  --text: var(--color-ink);
+  --muted: var(--color-muted);
+  --accent-1: var(--color-darkgreen);
+  --accent-2: var(--color-burgundy);
+  --shadow: var(--color-shadow);
+
+  color-scheme: light dark;
+  color: var(--text);
+  background-color: var(--bg);
 }
 
 /* Mobile-first adjustments */
@@ -21,17 +40,17 @@ html, body {
 
 .app-container {
   min-height: 100vh;
-  background-color: #0f172a; /* matches theme_color */
-  color: #0f172a;
+  background-color: var(--bg);
+  color: var(--text);
 }
 
 a {
   font-weight: 500;
-  color: #646cff;
+  color: var(--accent-1);
   text-decoration: inherit;
 }
 a:hover {
-  color: #535bf2;
+  color: var(--accent-2);
 }
 
 body {
@@ -47,18 +66,21 @@ h1 {
 }
 
 button {
-  border-radius: 8px;
-  border: 1px solid transparent;
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,0.06);
   padding: 0.6em 1.2em;
   font-size: 1em;
-  font-weight: 500;
+  font-weight: 600;
   font-family: inherit;
-  background-color: #1a1a1a;
+  background-color: var(--surface);
+  color: var(--text);
   cursor: pointer;
-  transition: border-color 0.25s;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  box-shadow: 0 6px 18px var(--shadow);
 }
 button:hover {
-  border-color: #646cff;
+  transform: translateY(-1px);
+  box-shadow: 0 10px 30px rgba(15,23,34,0.08);
 }
 
 /* Inputs & touch targets */
@@ -66,10 +88,16 @@ input[type="text"], input[type="date"], input[type="number"], textarea, select {
   font-size: 16px;
   padding: 0.75rem;
   border-radius: 12px;
-  border: 1px solid #e5e7eb;
-  background: white;
+  border: 1px solid rgba(15,23,34,0.08);
+  background: var(--surface);
+  color: var(--text);
   box-sizing: border-box;
+  caret-color: var(--accent-1);
 }
+
+/* placeholder and disabled styles */
+input::placeholder, textarea::placeholder { color: rgba(104,112,116,0.6); }
+input:disabled, textarea:disabled, select:disabled { opacity: 0.7; }
 
 .rounded-xl { border-radius: 12px; }
 .p-2 { padding: 0.5rem; }
@@ -84,7 +112,7 @@ input[type="text"], input[type="date"], input[type="number"], textarea, select {
 @media (max-width: 640px) {
   .table-wrapper table { display: none; }
   .card-list { display: block; }
-  .card-row { background: white; border-radius: 12px; padding: 12px; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(2,6,23,0.06); }
+  .card-row { background: var(--surface); border-radius: 12px; padding: 12px; margin-bottom: 10px; box-shadow: 0 1px 3px var(--shadow); }
   .card-row .row-field { display: flex; justify-content: space-between; padding: 6px 0; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
   .no-scrollbar::-webkit-scrollbar { display: none; }
@@ -94,7 +122,7 @@ input[type="text"], input[type="date"], input[type="number"], textarea, select {
 .bottom-nav { display: none; }
 @media (max-width: 640px) {
   .bottom-nav { display: flex; position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); gap: 8px; z-index: 60; }
-  .bottom-nav button { padding: 10px 14px; border-radius: 999px; box-shadow: 0 6px 18px rgba(2,6,23,0.2); }
+  .bottom-nav button { padding: 10px 14px; border-radius: 999px; box-shadow: 0 6px 18px rgba(15,23,34,0.12); background: var(--surface); color: var(--text); }
 }
 button:focus,
 button:focus-visible {
