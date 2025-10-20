@@ -1,6 +1,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import App from './App.tsx';
+// Lazy-load App to create a small initial chunk (code-splitting)
+const App = React.lazy(() => import('./App.tsx'));
 import './index.css';
 
 function showFatalError(title: string, details?: string) {
@@ -41,11 +42,13 @@ class ErrorBoundary extends React.Component<any, {error: any, info?: any}> {
   render(){ if(this.state.error){ return React.createElement('div',{style:{padding:24,background:'#fff',color:'#111',maxWidth:900,margin:'48px auto',borderRadius:8,boxShadow:'0 8px 30px rgba(2,6,23,0.08)'}}, React.createElement('h2', {style:{margin:'0 0 8px',color:'#b91c1c'}}, 'Fatal render error'), React.createElement('pre', {style:{whiteSpace:'pre-wrap',fontSize:13}}, String(this.state.error))); } return this.props.children; }
 }
 
-try {
+  try {
   createRoot(container).render(
     <React.StrictMode>
       <ErrorBoundary>
-        <App />
+        <React.Suspense fallback={<div style={{padding:24}}>Încărcare...</div>}>
+          <App />
+        </React.Suspense>
       </ErrorBoundary>
     </React.StrictMode>
   );
