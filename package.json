@@ -1,0 +1,21 @@
+{
+  "name": "buget-jukov-2026-backend",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": "18"
+  },
+  "scripts": {
+    "serve": "firebase emulators:start --only functions,hosting",
+    "start": "node index.js",
+    "deploy": "npx firebase-tools deploy --only functions,hosting --project bugetjukov",
+    "import-csv": "node import_csv.js ../buget-export-1760784496760.csv"
+  },
+  "dependencies": {
+  "firebase-admin": "^12.0.0",
+    "firebase-functions": "^4.4.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "csv-parse": "^5.3.6"
+  }
+}
